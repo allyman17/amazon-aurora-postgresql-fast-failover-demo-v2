@@ -1,0 +1,770 @@
+Conditions:
+  IsFailoverRegion: !Not
+    - !Equals
+      - !Ref 'PrimaryRegionName'
+      - !Ref 'AWS::Region'
+  IsPrimaryRegion: !Equals
+    - !Ref 'PrimaryRegionName'
+    - !Ref 'AWS::Region'
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups: []
+    ParameterLabels: {}
+  Comments: ''
+  CreatedBy: Carter Meyers (AWS)
+  Description: This application deploys a Global RDS Aurora cluster.
+  LastUpdated: September 25, 2024
+  Version: v2.11
+Parameters:
+  CodeDownloadUrl:
+    Default: https://codeload.github.com/allyman17/amazon-aurora-postgresql-fast-failover-demo-v2 /zip/refs/heads/main
+    Description: The URL from which the supporting codebase can be downloaded. This codebase is used to deploy the demo dashboard.
+    Type: String
+  DatabaseAdminPassword:
+    Description: The password to be used for the RDS Aurora admin account.
+    NoEcho: true
+    Type: String
+  DatabaseAdminUsername:
+    Description: The username to be used for the RDS Aurora admin account.
+    Type: String
+  FailoverDatabaseSubnetZoneACidr:
+    Default: 10.10.10.0/24
+    Description: The CIDR range you wish to use for your primary database subnet.
+    Type: String
+  FailoverDatabaseSubnetZoneBCidr:
+    Default: 10.10.13.0/24
+    Description: The CIDR range you wish to use for your failover database subnet.
+    Type: String
+  FailoverPrivateSubnetZoneACidr:
+    Default: 10.10.9.0/24
+    Description: The CIDR range you wish to use for your primary private subnet.
+    Type: String
+  FailoverPrivateSubnetZoneBCidr:
+    Default: 10.10.12.0/24
+    Description: The CIDR range you wish to use for your failover private subnet.
+    Type: String
+  FailoverPublicSubnetZoneACidr:
+    Default: 10.10.8.0/24
+    Description: The CIDR range you wish to use for your primary public subnet.
+    Type: String
+  FailoverPublicSubnetZoneBCidr:
+    Default: 10.10.11.0/24
+    Description: The CIDR range you wish to use for your failover public subnet.
+    Type: String
+  FailoverRegionName:
+    Default: us-east-2
+    Description: The name of the failover region (e.g., us-east-1). You may choose any AWS Region that supports the required services. The primary and failover regions must be different.
+    Type: String
+  FailoverVpcCidr:
+    Default: 10.10.8.0/21
+    Description: The CIDR range you wish to use for your VPC.
+    Type: String
+  MainStackName:
+    Type: String
+  PrimaryDatabaseSubnetZoneACidr:
+    Default: 10.10.2.0/24
+    Description: The CIDR range you wish to use for your primary database subnet.
+    Type: String
+  PrimaryDatabaseSubnetZoneBCidr:
+    Default: 10.10.5.0/24
+    Description: The CIDR range you wish to use for your failover database subnet.
+    Type: String
+  PrimaryPrivateSubnetZoneACidr:
+    Default: 10.10.1.0/24
+    Description: The CIDR range you wish to use for your primary private subnet.
+    Type: String
+  PrimaryPrivateSubnetZoneBCidr:
+    Default: 10.10.4.0/24
+    Description: The CIDR range you wish to use for your failover private subnet.
+    Type: String
+  PrimaryPublicSubnetZoneACidr:
+    Default: 10.10.0.0/24
+    Description: The CIDR range you wish to use for your primary public subnet.
+    Type: String
+  PrimaryPublicSubnetZoneBCidr:
+    Default: 10.10.3.0/24
+    Description: The CIDR range you wish to use for your failover public subnet.
+    Type: String
+  PrimaryRegionName:
+    Default: us-east-1
+    Description: The name of the primary region (e.g., us-east-1). You may choose any AWS Region that supports the required services. The primary and failover regions must be different.
+    Type: String
+  PrimaryVpcCidr:
+    Default: 10.10.0.0/21
+    Description: The CIDR range you wish to use for your VPC.
+    Type: String
+  PublicFqdn:
+    Description: >-
+      The FQDN to be used by this application (e.g., multi-region-aurora.example.com). An Amazon ACM Certificate will be issued for this FQDN and attached to an Amazon ALB. This FQDN should NOT have a DNS
+      record currently defined in the corresponding Route 53 Hosted Zone.
+    Type: String
+  PublicHostedZoneId:
+    Description: The ID of the public Route 53 Hosted Zone corresponding to the public Service FQDN.
+    Type: String
+Resources:
+  FailoverClusterPromoter:
+    Condition: IsPrimaryRegion
+    DependsOn:
+      - FailoverClusterPromoterRole
+    Properties:
+      Architectures:
+        - x86_64
+      Code:
+        ZipFile: "import sys\nsys.path.append('/opt')\n\nimport os\nimport json\nimport boto3\nimport psycopg2\nimport dateutil.tz\nimport multi_region_db\nfrom datetime import datetime\nfrom botocore.exceptions\
+          \ import ClientError as boto3_client_error\n\ncustom_functions = multi_region_db.Functions()\n\ndef initiate_global_cluster_failover():\n    \n    rds_client = boto3.client('rds')\n    \n    try:\n\
+          \        \n        print('Attempting to Retrieve Global DB Cluster Members: \"' + os.environ['GLOBAL_APP_DB_CLUSTER_IDENTIFIER'] + '\"')\n            \n        describe_cluster_resp = rds_client.describe_global_clusters(\n\
+          \            GlobalClusterIdentifier = os.environ['GLOBAL_APP_DB_CLUSTER_IDENTIFIER']\n        )\n        \n        '''\n            For each Global Cluster member\n        '''\n        for cluster_member\
+          \ in describe_cluster_resp['GlobalClusters'][0]['GlobalClusterMembers']:\n            \n                '''\n                    If there's a member in the failover region\n                '''\n\
+          \                if os.environ['FAILOVER_REGION_NAME'] in cluster_member['DBClusterArn']:\n                    \n                    try:\n                        \n                        print('Attempting\
+          \ to Promote Regional Cluster \"' + cluster_member['DBClusterArn'] + '\" within Global DB Cluster \"' + os.environ['GLOBAL_APP_DB_CLUSTER_IDENTIFIER'] + '\"')\n                        \n     \
+          \                   rds_client.failover_global_cluster(\n                            GlobalClusterIdentifier = os.environ['GLOBAL_APP_DB_CLUSTER_IDENTIFIER'],\n                            TargetDbClusterIdentifier\
+          \ = cluster_member['DBClusterArn'],\n                            AllowDataLoss = True\n                        )\n                        \n                        print('Successfully Promoted\
+          \ Regional Cluster \"' + cluster_member['DBClusterArn'] + '\" within Global DB Cluster \"' + os.environ['GLOBAL_APP_DB_CLUSTER_IDENTIFIER'] + '\"')\n                    \n                    except\
+          \ boto3_client_error as e:\n                        raise Exception('Failed to Promote Regional Cluster within Global DB Cluster: ' + str(e))\n                \n    except boto3_client_error as\
+          \ e:\n        raise Exception('Failed to Retrieve Global Cluster Members: ' + str(e))\n                    \n    return True\n    \ndef log_failover_event():\n    \n    demo_db_credentials = custom_functions.get_db_credentials('Demo')\n\
+          \    \n    db_conn = psycopg2.connect(\n        host = os.environ['REGIONAL_DEMO_DB_CLUSTER_WRITER_ENDPOINT'],\n        port = demo_db_credentials['port'],\n        user = demo_db_credentials['username'],\n\
+          \        sslmode = 'require',\n        password = demo_db_credentials['password'],\n        database = demo_db_credentials['database'],\n        connect_timeout = 3,\n    )\n    \n    eastern\
+          \ = dateutil.tz.gettz('US/Eastern')\n    \n    curs = db_conn.cursor()\n    curs.execute(\"INSERT INTO failoverevents (event,insertedon) values (2,'\" + datetime.now(tz = eastern).strftime(\"\
+          %m/%d/%Y %H:%M:%S\") + \"' )\")\n    db_conn.commit()\n    \n    curs.close()\n    db_conn.close()\n   \ndef handler(event, context):\n    \n    print(json.dumps(event))\n    \n    initiate_global_cluster_failover()\n\
+          \            \n    log_failover_event()"
+      Description: ''
+      Environment:
+        Variables:
+          FAILOVER_REGION_NAME: !Ref 'FailoverRegionName'
+          GLOBAL_APP_DB_CLUSTER_IDENTIFIER: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /GlobalAppDbClusterIdentifier}}
+          REGIONAL_APP_DB_CLUSTER_ARN: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalAppDbClusterArn}}
+          REGIONAL_DEMO_DB_CLUSTER_WRITER_ENDPOINT: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalDemoDbClusterWriterEndpoint}}
+          REGIONAL_DEMO_DB_SECRET_ARN: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalDemoDbAdminSecretArn}}
+      Handler: index.handler
+      Layers:
+        - !Join
+          - ''
+          - - '{{resolve:ssm:/'
+            - !Ref 'MainStackName'
+            - /RegionalLambdaLayerVersionArn}}
+      MemorySize: 128
+      Role: !GetAtt 'FailoverClusterPromoterRole.Arn'
+      Runtime: python3.11
+      Timeout: 15
+      TracingConfig:
+        Mode: PassThrough
+      VpcConfig:
+        SecurityGroupIds:
+          - !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /LambdaSecurityGroupId}}
+        SubnetIds:
+          - !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /PrivateSubnetZoneAId}}
+          - !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /PrivateSubnetZoneBId}}
+    Type: AWS::Lambda::Function
+  FailoverClusterPromoterEventsPermission:
+    Condition: IsPrimaryRegion
+    DependsOn:
+      - FailoverClusterPromoter
+      - WebsiteHealthCheckAlarmListener
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref 'FailoverClusterPromoter'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'WebsiteHealthCheckAlarmListener.Arn'
+    Type: AWS::Lambda::Permission
+  FailoverClusterPromoterLogGroup:
+    Condition: IsPrimaryRegion
+    DeletionPolicy: Delete
+    DependsOn:
+      - FailoverClusterPromoter
+    Properties:
+      LogGroupName: !Join
+        - ''
+        - - /aws/lambda/
+          - !Ref 'FailoverClusterPromoter'
+      RetentionInDays: 30
+    Type: AWS::Logs::LogGroup
+  FailoverClusterPromoterRole:
+    DependsOn: []
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      MaxSessionDuration: 3600
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - secretsmanager:GetSecretValue
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - '{{resolve:ssm:/'
+                      - !Ref 'MainStackName'
+                      - /RegionalAppDbAdminSecretArn}}
+                  - !Join
+                    - ''
+                    - - '{{resolve:ssm:/'
+                      - !Ref 'MainStackName'
+                      - /RegionalDemoDbAdminSecretArn}}
+                Sid: GetRDSAdminSecret
+              - Action:
+                  - kms:Decrypt
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - '{{resolve:ssm:/'
+                      - !Ref 'MainStackName'
+                      - /RegionalKmsKeyArn}}
+                Sid: DecryptWithKMS
+              - Action:
+                  - rds:DescribeGlobalClusters
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:'
+                      - !Ref 'AWS::Partition'
+                      - ':rds::'
+                      - !Ref 'AWS::AccountId'
+                      - ':global-cluster:'
+                      - !Join
+                        - ''
+                        - - '{{resolve:ssm:/'
+                          - !Ref 'MainStackName'
+                          - /GlobalAppDbClusterIdentifier}}
+                Sid: DescribeGlobalClusters
+              - Action:
+                  - rds:FailoverGlobalCluster
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:'
+                      - !Ref 'AWS::Partition'
+                      - ':rds:'
+                      - !Ref 'FailoverRegionName'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - :cluster:*
+                  - !Join
+                    - ''
+                    - - 'arn:'
+                      - !Ref 'AWS::Partition'
+                      - ':rds::'
+                      - !Ref 'AWS::AccountId'
+                      - ':global-cluster:'
+                      - !Join
+                        - ''
+                        - - '{{resolve:ssm:/'
+                          - !Ref 'MainStackName'
+                          - /GlobalAppDbClusterIdentifier}}
+                Sid: PromoteFailoverCluster
+          PolicyName: main-policy
+    Type: AWS::IAM::Role
+  FailoverCompletedEventListener:
+    DependsOn:
+      - FailoverCompletedHandler
+    Properties:
+      Description: Invokes Handler When Failover is Completed
+      EventPattern:
+        detail:
+          EventID:
+            - RDS-EVENT-0071
+          SourceArn:
+            - !Join
+              - ''
+              - - '{{resolve:ssm:/'
+                - !Ref 'MainStackName'
+                - /RegionalAppDbClusterArn}}
+        detail-type:
+          - RDS DB Cluster Event
+        source:
+          - aws.rds
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'FailoverCompletedHandler.Arn'
+          Id: FailoverCompletedHandler
+    Type: AWS::Events::Rule
+  FailoverCompletedHandler:
+    DependsOn:
+      - FailoverCompletedHandlerRole
+    Properties:
+      Architectures:
+        - x86_64
+      Code:
+        ZipFile: "import sys\nsys.path.append('/opt')\n\nimport os\nimport json\nimport boto3\nimport psycopg2\nimport dateutil.tz\nimport multi_region_db\nfrom datetime import datetime\nfrom datetime import\
+          \ timedelta\nfrom botocore.exceptions import ClientError as boto3_client_error\n\ncustom_functions = multi_region_db.Functions()\n\ndef enable_proxy_target_waiter_rule():\n    \n    print('Attempting\
+          \ to Enable Proxy Target Waiter Cron: \"' + os.environ['PROXY_MONITOR_CRON_NAME'] + '\"')\n\n    try:\n        \n        boto3.client('events').enable_rule(\n            Name = os.environ['PROXY_MONITOR_CRON_NAME']\n\
+          \        )\n        \n        print('Successfully Enabled Proxy Target Waiter Cron: \"' + os.environ['PROXY_MONITOR_CRON_NAME'] + '\"')\n        \n    except boto3_client_error as e:\n       \
+          \ raise Exception('Failed to Enable Proxy Target Waiter Cron: ' + str(e))\n    \ndef point_service_fqdn_to_failover_web_alb():\n    \n    try:\n\n        boto3.client('route53').change_resource_record_sets(\n\
+          \            ChangeBatch = {\n                'Changes': [\n                    {\n                        'Action': 'UPSERT',\n                        'ResourceRecordSet': {\n               \
+          \             'Name': os.environ['PUBLIC_FQDN'],\n                            'AliasTarget': {\n                                'DNSName': os.environ['REGIONAL_WEB_ALB_FQDN'],\n              \
+          \                  'HostedZoneId': os.environ['REGIONAL_WEB_ALB_HOSTED_ZONE_ID'],\n                                'EvaluateTargetHealth': False\n                            },\n             \
+          \               'Type': 'A'\n                        },\n                    },\n                ],\n            },\n            HostedZoneId = os.environ['PUBLIC_HOSTED_ZONE_ID'],\n        )\n\
+          \        \n    except boto3_client_error as e:\n        raise Exception('Failed to Update ALB DNS Record: ' + str(e))\n\ndef register_failover_cluster_as_proxy_target():\n    \n    try:\n    \
+          \    \n        boto3.client('rds').register_db_proxy_targets(\n            DBProxyName             = os.environ['REGIONAL_APP_DB_PROXY_NAME'],\n            TargetGroupName         = 'default',\n\
+          \            DBClusterIdentifiers    = [\n                os.environ['REGIONAL_APP_DB_CLUSTER_IDENTIFIER']\n            ]\n        )\n    \n    except boto3_client_error as e:\n        raise Exception('Failed\
+          \ to Register Failover Cluster as Proxy Target: ' + str(e))\n        \ndef handler(event, context):\n    \n    print(json.dumps(event))\n    \n    eastern = dateutil.tz.gettz('US/Eastern')\n \
+          \   \n    demo_db_credentials = custom_functions.get_db_credentials('Demo')\n\n    db_conn = psycopg2.connect(\n        host = os.environ['REGIONAL_DEMO_DB_CLUSTER_WRITER_ENDPOINT'],\n       \
+          \ port = demo_db_credentials['port'],\n        user = demo_db_credentials['username'],\n        password = demo_db_credentials['password'],\n        database = demo_db_credentials['database'],\n\
+          \        connect_timeout = 3,\n        sslmode = 'require',\n    )\n    \n    current_region = os.environ['AWS_REGION']\n    \n    if current_region == os.environ['PRIMARY_REGION_NAME']:\n   \
+          \     \n        curs = db_conn.cursor()\n        curs.execute(\"INSERT INTO failoverevents (event,insertedon) values (3,'\" + datetime.now(tz = eastern).strftime(\"%m/%d/%Y %H:%M:%S\") + \"' )\"\
+          )\n        db_conn.commit()\n        \n    elif current_region == os.environ['FAILOVER_REGION_NAME']:\n        \n        point_service_fqdn_to_failover_web_alb()\n      \n    '''\n        Logs\
+          \ CNAME Update\n    '''\n    curs = db_conn.cursor()\n    curs.execute(\"INSERT INTO failoverevents (event,insertedon) values (4,'\" + datetime.now(tz = eastern).strftime(\"%m/%d/%Y %H:%M:%S\"\
+          ) + \"' )\")\n    db_conn.commit()\n    \n    '''\n        Logs Failover Completion\n    '''\n    curs = db_conn.cursor()\n    curs.execute(\"INSERT INTO failoverevents (event,insertedon) values\
+          \ (3,'\" + datetime.now(tz = eastern).strftime(\"%m/%d/%Y %H:%M:%S\") + \"' )\")\n    db_conn.commit()\n        \n    curs.close()\n    db_conn.close()\n    \n    return True"
+      Description: Processes failover completed events
+      Environment:
+        Variables:
+          FAILOVER_REGION_NAME: !Ref 'FailoverRegionName'
+          PRIMARY_REGION_NAME: !Ref 'PrimaryRegionName'
+          PUBLIC_FQDN: !Ref 'PublicFqdn'
+          PUBLIC_HOSTED_ZONE_ID: !Ref 'PublicHostedZoneId'
+          REGIONAL_APP_DB_CLUSTER_IDENTIFIER: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalAppDbClusterIdentifier}}
+          REGIONAL_APP_DB_CLUSTER_READER_ENDPOINT: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalAppDbClusterReaderEndpoint}}
+          REGIONAL_APP_DB_CLUSTER_WRITER_ENDPOINT: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalAppDbClusterWriterEndpoint}}
+          REGIONAL_APP_DB_PROXY_NAME: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /
+              - RegionalAppDbProxyName}}
+          REGIONAL_APP_DB_SECRET_ARN: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalAppDbAdminSecretArn}}
+          REGIONAL_DEMO_DB_CLUSTER_WRITER_ENDPOINT: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalDemoDbClusterWriterEndpoint}}
+          REGIONAL_DEMO_DB_SECRET_ARN: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalDemoDbAdminSecretArn}}
+          REGIONAL_WEB_ALB_FQDN: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /WebLoadBalancerFqdn}}
+          REGIONAL_WEB_ALB_HOSTED_ZONE_ID: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /WebLoadBalancerHostedZoneId}}
+      Handler: index.handler
+      Layers:
+        - !Join
+          - ''
+          - - '{{resolve:ssm:/'
+            - !Ref 'MainStackName'
+            - /RegionalLambdaLayerVersionArn}}
+      MemorySize: 128
+      Role: !GetAtt 'FailoverCompletedHandlerRole.Arn'
+      Runtime: python3.11
+      Timeout: 15
+      TracingConfig:
+        Mode: PassThrough
+      VpcConfig:
+        SecurityGroupIds:
+          - !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /LambdaSecurityGroupId}}
+        SubnetIds:
+          - !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /PrivateSubnetZoneAId}}
+          - !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /PrivateSubnetZoneBId}}
+    Type: AWS::Lambda::Function
+  FailoverCompletedHandlerLogGroup:
+    DeletionPolicy: Delete
+    DependsOn:
+      - FailoverCompletedHandler
+    Properties:
+      LogGroupName: !Join
+        - ''
+        - - /aws/lambda/
+          - !Ref 'FailoverCompletedHandler'
+      RetentionInDays: 30
+    Type: AWS::Logs::LogGroup
+  FailoverCompletedHandlerPermission:
+    DependsOn:
+      - FailoverCompletedHandler
+      - FailoverCompletedEventListener
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref 'FailoverCompletedHandler'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'FailoverCompletedEventListener.Arn'
+    Type: AWS::Lambda::Permission
+  FailoverCompletedHandlerRole:
+    DependsOn: []
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      MaxSessionDuration: 3600
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - secretsmanager:GetSecretValue
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - '{{resolve:ssm:/'
+                      - !Ref 'MainStackName'
+                      - /RegionalAppDbAdminSecretArn}}
+                  - !Join
+                    - ''
+                    - - '{{resolve:ssm:/'
+                      - !Ref 'MainStackName'
+                      - /RegionalDemoDbAdminSecretArn}}
+                Sid: GetRDSAdminSecret
+              - Action:
+                  - kms:Decrypt
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - '{{resolve:ssm:/'
+                      - !Ref 'MainStackName'
+                      - /RegionalKmsKeyArn}}
+                Sid: DecryptWithKMS
+          PolicyName: main-policy
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - route53:ChangeResourceRecordSets
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - arn:aws:route53:::hostedzone/
+                      - !Ref 'PublicHostedZoneId'
+                Sid: UpdateRoute53Records
+          PolicyName: update-route53-records
+    Type: AWS::IAM::Role
+  FailoverStartedEventListener:
+    DependsOn:
+      - FailoverStartedHandler
+    Properties:
+      Description: Invokes Handler When Failover is Started
+      EventPattern:
+        detail:
+          EventID:
+            - RDS-EVENT-0073
+          SourceArn:
+            - !Join
+              - ''
+              - - '{{resolve:ssm:/'
+                - !Ref 'MainStackName'
+                - /RegionalAppDbClusterArn}}
+        detail-type:
+          - RDS DB Cluster Event
+        source:
+          - aws.rds
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'FailoverStartedHandler.Arn'
+          Id: FailoverStartedHandler
+    Type: AWS::Events::Rule
+  FailoverStartedHandler:
+    DependsOn:
+      - FailoverStartedHandlerRole
+    Properties:
+      Architectures:
+        - x86_64
+      Code:
+        ZipFile: "import sys\nsys.path.append('/opt')\n\nimport os\nimport json\nimport boto3\nimport psycopg2\nimport datetime\nimport dateutil.tz\nimport multi_region_db\nfrom botocore.exceptions import\
+          \ ClientError as boto3_client_error\n\ncustom_functions = multi_region_db.Functions()\n\ndef handler(event, context):\n    \n    print(json.dumps(event))\n    \n    eastern = dateutil.tz.gettz('US/Eastern')\n\
+          \    \n    demo_db_credentials = custom_functions.get_db_credentials('Demo')\n\n    db_conn = psycopg2.connect(\n        host = os.environ['REGIONAL_DEMO_DB_CLUSTER_WRITER_ENDPOINT'],\n      \
+          \  port = demo_db_credentials['port'],\n        user = demo_db_credentials['username'],\n        password = demo_db_credentials['password'],\n        database = demo_db_credentials['database'],\n\
+          \        connect_timeout = 3,\n        sslmode = 'require',\n    )\n\n    curs = db_conn.cursor()\n    curs.execute(\"INSERT INTO failoverevents (event,insertedon) values (2,'\" + datetime.datetime.now(tz\
+          \ = eastern).strftime(\"%m/%d/%Y %H:%M:%S\") + \"' )\")\n    db_conn.commit()\n    \n    curs.close()\n    db_conn.close()\n    \n    return True"
+      Description: Processes failover started events
+      Environment:
+        Variables:
+          FAILOVER_REGION_NAME: !Ref 'FailoverRegionName'
+          PRIMARY_REGION_NAME: !Ref 'PrimaryRegionName'
+          PUBLIC_FQDN: !Ref 'PublicFqdn'
+          PUBLIC_HOSTED_ZONE_ID: !Ref 'PublicHostedZoneId'
+          REGIONAL_APP_DB_CLUSTER_IDENTIFIER: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalAppDbClusterIdentifier}}
+          REGIONAL_APP_DB_CLUSTER_READER_ENDPOINT: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalAppDbClusterReaderEndpoint}}
+          REGIONAL_APP_DB_CLUSTER_WRITER_ENDPOINT: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalAppDbClusterWriterEndpoint}}
+          REGIONAL_APP_DB_PROXY_NAME: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /
+              - RegionalAppDbProxyName}}
+          REGIONAL_APP_DB_SECRET_ARN: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalAppDbAdminSecretArn}}
+          REGIONAL_DEMO_DB_CLUSTER_WRITER_ENDPOINT: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalDemoDbClusterWriterEndpoint}}
+          REGIONAL_DEMO_DB_SECRET_ARN: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /RegionalDemoDbAdminSecretArn}}
+          REGIONAL_WEB_ALB_FQDN: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /WebLoadBalancerFqdn}}
+          REGIONAL_WEB_ALB_HOSTED_ZONE_ID: !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /WebLoadBalancerHostedZoneId}}
+      Handler: index.handler
+      Layers:
+        - !Join
+          - ''
+          - - '{{resolve:ssm:/'
+            - !Ref 'MainStackName'
+            - /RegionalLambdaLayerVersionArn}}
+      MemorySize: 128
+      Role: !GetAtt 'FailoverStartedHandlerRole.Arn'
+      Runtime: python3.11
+      Timeout: 15
+      TracingConfig:
+        Mode: PassThrough
+      VpcConfig:
+        SecurityGroupIds:
+          - !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /LambdaSecurityGroupId}}
+        SubnetIds:
+          - !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /PrivateSubnetZoneAId}}
+          - !Join
+            - ''
+            - - '{{resolve:ssm:/'
+              - !Ref 'MainStackName'
+              - /PrivateSubnetZoneBId}}
+    Type: AWS::Lambda::Function
+  FailoverStartedHandlerLogGroup:
+    DeletionPolicy: Delete
+    DependsOn:
+      - FailoverStartedHandler
+    Properties:
+      LogGroupName: !Join
+        - ''
+        - - /aws/lambda/
+          - !Ref 'FailoverStartedHandler'
+      RetentionInDays: 30
+    Type: AWS::Logs::LogGroup
+  FailoverStartedHandlerPermission:
+    DependsOn:
+      - FailoverStartedHandler
+      - FailoverStartedEventListener
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref 'FailoverStartedHandler'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'FailoverStartedEventListener.Arn'
+    Type: AWS::Lambda::Permission
+  FailoverStartedHandlerRole:
+    DependsOn: []
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      MaxSessionDuration: 3600
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - secretsmanager:GetSecretValue
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - '{{resolve:ssm:/'
+                      - !Ref 'MainStackName'
+                      - /RegionalAppDbAdminSecretArn}}
+                  - !Join
+                    - ''
+                    - - '{{resolve:ssm:/'
+                      - !Ref 'MainStackName'
+                      - /RegionalDemoDbAdminSecretArn}}
+                Sid: GetRDSAdminSecret
+              - Action:
+                  - kms:Decrypt
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - '{{resolve:ssm:/'
+                      - !Ref 'MainStackName'
+                      - /RegionalKmsKeyArn}}
+                Sid: DecryptWithKMS
+          PolicyName: main-policy
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - route53:ChangeResourceRecordSets
+                Effect: Allow
+                Resource:
+                  - !Join
+                    - ''
+                    - - arn:aws:route53:::hostedzone/
+                      - !Ref 'PublicHostedZoneId'
+                Sid: UpdateRoute53Records
+          PolicyName: update-route53-records
+    Type: AWS::IAM::Role
+  WebsiteHealthCheck:
+    Condition: IsPrimaryRegion
+    Properties:
+      HealthCheckConfig:
+        EnableSNI: false
+        FailureThreshold: '1'
+        FullyQualifiedDomainName: !Ref 'PublicFqdn'
+        Inverted: false
+        MeasureLatency: false
+        Port: 443
+        RequestInterval: '10'
+        ResourcePath: ''
+        Type: HTTPS
+    Type: AWS::Route53::HealthCheck
+  WebsiteHealthCheckAlarm:
+    Condition: IsPrimaryRegion
+    DependsOn:
+      - WebsiteHealthCheck
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Join
+        - ''
+        - - 'Alerts when '
+          - !Ref 'PublicFqdn'
+          - ' is unavailable.'
+      ComparisonOperator: LessThanOrEqualToThreshold
+      Dimensions:
+        - Name: HealthCheckId
+          Value: !Ref 'WebsiteHealthCheck'
+      EvaluationPeriods: 1
+      MetricName: HealthCheckStatus
+      Namespace: AWS/Route53
+      Period: 10
+      Statistic: Sum
+      Threshold: '0'
+      TreatMissingData: ignore
+    Type: AWS::CloudWatch::Alarm
+  WebsiteHealthCheckAlarmListener:
+    Condition: IsPrimaryRegion
+    DependsOn:
+      - FailoverClusterPromoter
+    Properties:
+      Description: Invokes Handler When Failure is Detected
+      EventPattern:
+        detail:
+          state:
+            value:
+              - ALARM
+        detail-type:
+          - CloudWatch Alarm State Change
+        resources:
+          - !GetAtt 'WebsiteHealthCheckAlarm.Arn'
+        source:
+          - aws.cloudwatch
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'FailoverClusterPromoter.Arn'
+          Id: FailoverClusterPromoter
+    Type: AWS::Events::Rule
